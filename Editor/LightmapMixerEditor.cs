@@ -831,7 +831,7 @@ public class LightmapMixerEditor : Editor
             return;
         }
 
-        FinishBakeSequence();
+        FinishBakeSequence(true);
     }
 
     private static void ScheduleNextBakeStep(System.Action action, string label)
@@ -878,7 +878,7 @@ public class LightmapMixerEditor : Editor
     {
         if (!ValidateActiveBake())
         {
-            FinishBakeSequence();
+            FinishBakeSequence(true);
             return;
         }
 
@@ -1020,7 +1020,7 @@ public class LightmapMixerEditor : Editor
         if (!activeBakeInstaller.renderReflectionProbesAfterLightmaps)
         {
             reflectionProbesBCompleted = true;
-            FinishBakeSequence();
+            FinishBakeSequence(true);
             return;
         }
 
@@ -1031,7 +1031,7 @@ public class LightmapMixerEditor : Editor
         }
 
         reflectionProbesBCompleted = true;
-        FinishBakeSequence();
+        FinishBakeSequence(true);
     }
 
     private static void RenderReflectionProbesB()
@@ -1064,6 +1064,11 @@ public class LightmapMixerEditor : Editor
 
     private static void FinishBakeSequence()
     {
+        FinishBakeSequence(false);
+    }
+
+    private static void FinishBakeSequence(bool showCompletionDialog)
+    {
         RestoreBakeEmissionColors();
 
         if (activeBakeInstaller != null && activeBakeInstaller.restoreObjectStatesAfterRendering)
@@ -1083,6 +1088,12 @@ public class LightmapMixerEditor : Editor
         Debug.Log("[VRCLightmapMixer] Lightmap rendering completed.");
         StopBakeMonitor();
         UnregisterBakeryCallbacks();
+        EditorApplication.delayCall -= ShowBakeCompletedDialog;
+        if (showCompletionDialog)
+        {
+            EditorApplication.delayCall += ShowBakeCompletedDialog;
+        }
+
         EditorApplication.delayCall -= CopyAfterBakeOutputIsReady;
         EditorApplication.update -= PollCopyAfterBakeOutput;
         savedObjectStates.Clear();
@@ -1091,6 +1102,11 @@ public class LightmapMixerEditor : Editor
         reflectionProbesBCompleted = false;
         activeBakeInstaller = null;
         activeBakeStep = BakeStep.Idle;
+    }
+
+    private static void ShowBakeCompletedDialog()
+    {
+        EditorUtility.DisplayDialog("VRCLightmapMixer", "ライトベイクが完了しました。", "OK");
     }
 
     private static bool ValidateActiveBake()
