@@ -69,7 +69,7 @@ Shader/Standard_MultiLightmap
 
 `Lightmap Aでベイクするリフレクションプローブ` と `Lightmap Bでベイクするリフレクションプローブ` に、それぞれの状態で焼きたい Reflection Probe の GameObject を入れます。
 
-A 用の Reflection Probe を作ったあと、それを複製して B 用にするのが簡単です。その際、A 用と B 用が完全に同じ位置だと扱いづらいことがあるため、片方を少しだけ、例えば `0.01` 程度ずらしておくと管理しやすくなります。
+A 用の Reflection Probe を作ったあと、それを複製して B 用にするのが簡単です。その際、A 用と B 用が完全に同じ位置だとブレンドが行われないため、片方を少しだけ、例えば `0.01` 程度ずらしておいてください。
 
 Renderer 側の `Probe Mode` は `Blend Probes` にしておきます。通常はデフォルトでこの設定になっています。
 
