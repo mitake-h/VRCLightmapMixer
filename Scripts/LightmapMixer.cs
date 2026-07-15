@@ -69,6 +69,12 @@ namespace Jumius.VRCLightmapMixer
         private Color[] _runtimeEmissiveBaseColorsForLightmapB;
         private int _runtimeEmissiveMaterialCountA;
         private int _runtimeEmissiveMaterialCountB;
+        private Material[] _runtimeMaterialCacheSources;
+        private int[] _runtimeMaterialCacheLightmapIndices;
+        private Texture2D[] _runtimeMaterialCacheLightMapA;
+        private Texture2D[] _runtimeMaterialCacheLightMapB;
+        private Material[] _runtimeMaterialCacheMaterials;
+        private int _runtimeMaterialCacheCount;
         private bool _runtimeApplyInitialized;
         private bool _runtimeApplyInProgress;
 
@@ -101,6 +107,7 @@ namespace Jumius.VRCLightmapMixer
             }
 
             PrepareRuntimeEmissiveMaterialTargets(CountTargetMaterialSlots());
+            PrepareRuntimeMaterialCache(CountTargetMaterialSlots());
 
             for (int i = 0; i < targetRenderers.Length; i++)
             {
@@ -124,35 +131,44 @@ namespace Jumius.VRCLightmapMixer
                 }
 
                 Material[] sourceMaterials = targetRenderer.sharedMaterials;
-                Material[] runtimeMaterials = targetRenderer.materials;
-                if (runtimeMaterials == null)
+                if (sourceMaterials == null)
                 {
                     continue;
                 }
 
-                for (int materialIndex = 0; materialIndex < runtimeMaterials.Length; materialIndex++)
+                Material[] assignedMaterials = new Material[sourceMaterials.Length];
+                Material[] clonedMaterials = null;
+
+                for (int materialIndex = 0; materialIndex < sourceMaterials.Length; materialIndex++)
                 {
-                    Material material = runtimeMaterials[materialIndex];
-                    if (material == null)
+                    Material sourceMaterial = GetMaterialAt(sourceMaterials, materialIndex);
+                    if (sourceMaterial == null)
                     {
                         continue;
                     }
 
-                    Material sourceMaterial = GetMaterialAt(sourceMaterials, materialIndex);
-                    RegisterRuntimeEmissiveMaterial(material, sourceMaterial);
+                    Material material = FindCachedRuntimeMaterial(sourceMaterial, lightmapIndex, lightMapA, lightMapB);
+                    if (material == null)
+                    {
+                        if (clonedMaterials == null)
+                        {
+                            clonedMaterials = targetRenderer.materials;
+                        }
 
-                    material.shader = replacementShader;
-                    if (lightMapA != null)
-                    {
-                        material.SetTexture(LightMapAProperty, lightMapA);
+                        material = GetMaterialAt(clonedMaterials, materialIndex);
+                        if (material == null)
+                        {
+                            continue;
+                        }
+
+                        ConfigureRuntimeMaterial(material, sourceMaterial, lightMapA, lightMapB);
+                        AddRuntimeMaterialCache(sourceMaterial, lightmapIndex, lightMapA, lightMapB, material);
                     }
-                    if (lightMapB != null)
-                    {
-                        material.SetTexture(LightMapBProperty, lightMapB);
-                    }
+
+                    assignedMaterials[materialIndex] = material;
                 }
 
-                targetRenderer.materials = runtimeMaterials;
+                targetRenderer.materials = assignedMaterials;
             }
 
             ApplyRuntimeEmissiveMaterials();
@@ -178,6 +194,76 @@ namespace Jumius.VRCLightmapMixer
             }
 
             return materials[index];
+        }
+
+        private void PrepareRuntimeMaterialCache(int materialSlotCount)
+        {
+            _runtimeMaterialCacheSources = new Material[materialSlotCount];
+            _runtimeMaterialCacheLightmapIndices = new int[materialSlotCount];
+            _runtimeMaterialCacheLightMapA = new Texture2D[materialSlotCount];
+            _runtimeMaterialCacheLightMapB = new Texture2D[materialSlotCount];
+            _runtimeMaterialCacheMaterials = new Material[materialSlotCount];
+            _runtimeMaterialCacheCount = 0;
+        }
+
+        private Material FindCachedRuntimeMaterial(Material sourceMaterial, int lightmapIndex, Texture2D lightMapA, Texture2D lightMapB)
+        {
+            if (_runtimeMaterialCacheSources == null ||
+                _runtimeMaterialCacheLightmapIndices == null ||
+                _runtimeMaterialCacheLightMapA == null ||
+                _runtimeMaterialCacheLightMapB == null ||
+                _runtimeMaterialCacheMaterials == null)
+            {
+                return null;
+            }
+
+            for (int i = 0; i < _runtimeMaterialCacheCount; i++)
+            {
+                if (_runtimeMaterialCacheSources[i] == sourceMaterial &&
+                    _runtimeMaterialCacheLightmapIndices[i] == lightmapIndex &&
+                    _runtimeMaterialCacheLightMapA[i] == lightMapA &&
+                    _runtimeMaterialCacheLightMapB[i] == lightMapB)
+                {
+                    return _runtimeMaterialCacheMaterials[i];
+                }
+            }
+
+            return null;
+        }
+
+        private void AddRuntimeMaterialCache(Material sourceMaterial, int lightmapIndex, Texture2D lightMapA, Texture2D lightMapB, Material runtimeMaterial)
+        {
+            if (_runtimeMaterialCacheSources == null ||
+                _runtimeMaterialCacheLightmapIndices == null ||
+                _runtimeMaterialCacheLightMapA == null ||
+                _runtimeMaterialCacheLightMapB == null ||
+                _runtimeMaterialCacheMaterials == null ||
+                _runtimeMaterialCacheCount >= _runtimeMaterialCacheMaterials.Length)
+            {
+                return;
+            }
+
+            _runtimeMaterialCacheSources[_runtimeMaterialCacheCount] = sourceMaterial;
+            _runtimeMaterialCacheLightmapIndices[_runtimeMaterialCacheCount] = lightmapIndex;
+            _runtimeMaterialCacheLightMapA[_runtimeMaterialCacheCount] = lightMapA;
+            _runtimeMaterialCacheLightMapB[_runtimeMaterialCacheCount] = lightMapB;
+            _runtimeMaterialCacheMaterials[_runtimeMaterialCacheCount] = runtimeMaterial;
+            _runtimeMaterialCacheCount++;
+        }
+
+        private void ConfigureRuntimeMaterial(Material material, Material sourceMaterial, Texture2D lightMapA, Texture2D lightMapB)
+        {
+            RegisterRuntimeEmissiveMaterial(material, sourceMaterial);
+
+            material.shader = replacementShader;
+            if (lightMapA != null)
+            {
+                material.SetTexture(LightMapAProperty, lightMapA);
+            }
+            if (lightMapB != null)
+            {
+                material.SetTexture(LightMapBProperty, lightMapB);
+            }
         }
 
         private int CountTargetMaterialSlots()
