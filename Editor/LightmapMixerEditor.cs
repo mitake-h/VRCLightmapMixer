@@ -30,6 +30,13 @@ public class LightmapMixerEditor : Editor
     private static int pendingCopyAttempts;
     private static double pendingCopyStartedAt;
     private static double pendingNextCopyAt;
+    private static bool pendingLightVolumeCopyAndAssign;
+    private static bool pendingLightVolumeAssignA;
+    private static int pendingLightVolumeAttempts;
+    private static double pendingLightVolumeStartedAt;
+    private static double pendingNextLightVolumeCheckAt;
+    private static string pendingLightVolumeNextStepLabel;
+    private static System.Action pendingLightVolumeNextStep;
     private static bool bakeMonitorActive;
     private static bool bakeMonitorSawInProgress;
     private static bool bakeMonitorLastInProgress;
@@ -37,9 +44,14 @@ public class LightmapMixerEditor : Editor
     private static int renderPassSequence;
     private static bool reflectionProbesACompleted;
     private static bool reflectionProbesBCompleted;
+    private static bool showLightVolumeSettings = true;
+    private static bool showBakeMaterialParameterSettings = true;
     private const int MaxBakeStartWaitFrames = 300;
     private const double MaxPendingCopyWaitSeconds = 90.0;
+    private const double MaxPendingLightVolumeWaitSeconds = 300.0;
     private const double PendingCopyPollIntervalSeconds = 0.5;
+    private const string LightVolumeTextureAProperty = "_TexA";
+    private const string LightVolumeTextureBProperty = "_TexB";
 
     public override void OnInspectorGUI()
     {
@@ -92,7 +104,30 @@ public class LightmapMixerEditor : Editor
             DrawProperty("activeReflectionProbesForLightmapB", "Lightmap Bでベイクするリフレクションプローブ");
             DrawProperty("emissiveMaterialsForLightmapA", "Lightmap Aで光らせるマテリアル");
             DrawProperty("emissiveMaterialsForLightmapB", "Lightmap Bで光らせるマテリアル");
+            DrawLightVolumeSettings();
             DrawBakeMaterialParameters(serializedObject);
+        }
+    }
+
+    private void DrawLightVolumeSettings()
+    {
+        EditorGUILayout.Space();
+        using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
+        {
+            Rect foldoutRect = EditorGUILayout.GetControlRect();
+            foldoutRect.x += 12f;
+            foldoutRect.width -= 12f;
+            showLightVolumeSettings = EditorGUI.Foldout(foldoutRect, showLightVolumeSettings, "VRCLightVolume", true);
+            if (!showLightVolumeSettings)
+            {
+                return;
+            }
+
+            EditorGUI.indentLevel++;
+            DrawProperty("mixedLightVolumeMaterial", "VRCLV混合マテリアル");
+            DrawProperty("mixedLightVolumeAtlas", "MixedLightVolumeAtlas");
+            DrawProperty("lightVolumeManager", "Light Volume Manager");
+            EditorGUI.indentLevel--;
         }
     }
 
@@ -371,13 +406,38 @@ public class LightmapMixerEditor : Editor
     {
         int targetCount = installer.targetRenderers == null ? 0 : installer.targetRenderers.Length;
         int indexCount = installer.targetLightmapIndices == null ? 0 : installer.targetLightmapIndices.Length;
+        int unresolvedIndexCount = CountUnresolvedLightmapIndices(installer);
         EditorGUILayout.LabelField("Collected Renderers", targetCount.ToString());
         EditorGUILayout.LabelField("Stored Lightmap Indices", indexCount.ToString());
+        EditorGUILayout.LabelField("Pending Lightmap Indices", unresolvedIndexCount.ToString());
 
         if (targetCount != indexCount)
         {
             EditorGUILayout.HelpBox("Target renderers and stored lightmap indices are out of sync. Collect targets again before entering play mode or uploading.", MessageType.Warning);
         }
+        else if (unresolvedIndexCount > 0)
+        {
+            EditorGUILayout.HelpBox("Some collected renderers do not have a lightmap index yet. This is expected before the first bake. Run LightmapMixer bake and collect again after lightmaps are assigned.", MessageType.Info);
+        }
+    }
+
+    private static int CountUnresolvedLightmapIndices(LightmapMixer installer)
+    {
+        if (installer == null || installer.targetLightmapIndices == null)
+        {
+            return 0;
+        }
+
+        int count = 0;
+        for (int i = 0; i < installer.targetLightmapIndices.Length; i++)
+        {
+            if (installer.targetLightmapIndices[i] < 0)
+            {
+                count++;
+            }
+        }
+
+        return count;
     }
 
     private static void DrawBakeMaterialParameters(SerializedObject serializedObject)
@@ -391,58 +451,73 @@ public class LightmapMixerEditor : Editor
             return;
         }
 
-        EditorGUILayout.Space();
-        EditorGUILayout.LabelField("Lightmapごとにシェーダパラメータを変えるマテリアル", EditorStyles.boldLabel);
         int count = Mathf.Max(materials.arraySize, names.arraySize, valuesA.arraySize, valuesB.arraySize);
         SetBakeMaterialParameterArraySize(materials, names, valuesA, valuesB, count);
 
-        using (new EditorGUILayout.HorizontalScope())
+        EditorGUILayout.Space();
+        using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
         {
-            EditorGUILayout.LabelField("Material", GUILayout.MinWidth(120));
-            EditorGUILayout.LabelField("Shader Parameter", GUILayout.MinWidth(120));
-            EditorGUILayout.LabelField("A Value", GUILayout.Width(70));
-            EditorGUILayout.LabelField("B Value", GUILayout.Width(70));
-            GUILayout.Space(28);
-        }
+            Rect foldoutRect = EditorGUILayout.GetControlRect();
+            foldoutRect.x += 12f;
+            foldoutRect.width -= 12f;
+            showBakeMaterialParameterSettings = EditorGUI.Foldout(
+                foldoutRect,
+                showBakeMaterialParameterSettings,
+                "Lightmapごとにシェーダパラメータを変えるマテリアル",
+                true);
+            if (!showBakeMaterialParameterSettings)
+            {
+                return;
+            }
 
-        int removeIndex = -1;
-        for (int i = 0; i < count; i++)
-        {
             using (new EditorGUILayout.HorizontalScope())
             {
-                SerializedProperty material = materials.GetArrayElementAtIndex(i);
-                SerializedProperty parameterName = names.GetArrayElementAtIndex(i);
-                SerializedProperty valueA = valuesA.GetArrayElementAtIndex(i);
-                SerializedProperty valueB = valuesB.GetArrayElementAtIndex(i);
+                EditorGUILayout.LabelField("Material", GUILayout.MinWidth(120));
+                EditorGUILayout.LabelField("Shader Parameter", GUILayout.MinWidth(120));
+                EditorGUILayout.LabelField("A Value", GUILayout.Width(70));
+                EditorGUILayout.LabelField("B Value", GUILayout.Width(70));
+                GUILayout.Space(28);
+            }
 
-                material.objectReferenceValue = EditorGUILayout.ObjectField(material.objectReferenceValue, typeof(Material), false, GUILayout.MinWidth(120));
-                parameterName.stringValue = EditorGUILayout.TextField(parameterName.stringValue, GUILayout.MinWidth(120));
-                valueA.floatValue = EditorGUILayout.FloatField(valueA.floatValue, GUILayout.Width(70));
-                valueB.floatValue = EditorGUILayout.FloatField(valueB.floatValue, GUILayout.Width(70));
-
-                if (GUILayout.Button("-", GUILayout.Width(24)))
+            int removeIndex = -1;
+            for (int i = 0; i < count; i++)
+            {
+                using (new EditorGUILayout.HorizontalScope())
                 {
-                    removeIndex = i;
+                    SerializedProperty material = materials.GetArrayElementAtIndex(i);
+                    SerializedProperty parameterName = names.GetArrayElementAtIndex(i);
+                    SerializedProperty valueA = valuesA.GetArrayElementAtIndex(i);
+                    SerializedProperty valueB = valuesB.GetArrayElementAtIndex(i);
+
+                    material.objectReferenceValue = EditorGUILayout.ObjectField(material.objectReferenceValue, typeof(Material), false, GUILayout.MinWidth(120));
+                    parameterName.stringValue = EditorGUILayout.TextField(parameterName.stringValue, GUILayout.MinWidth(120));
+                    valueA.floatValue = EditorGUILayout.FloatField(valueA.floatValue, GUILayout.Width(70));
+                    valueB.floatValue = EditorGUILayout.FloatField(valueB.floatValue, GUILayout.Width(70));
+
+                    if (GUILayout.Button("-", GUILayout.Width(24)))
+                    {
+                        removeIndex = i;
+                    }
                 }
             }
-        }
 
-        if (removeIndex >= 0)
-        {
-            RemoveBakeMaterialParameterRow(materials, names, valuesA, valuesB, removeIndex);
-        }
+            if (removeIndex >= 0)
+            {
+                RemoveBakeMaterialParameterRow(materials, names, valuesA, valuesB, removeIndex);
+            }
 
-        if (GUILayout.Button("対象マテリアルを追加"))
-        {
-            int newIndex = materials.arraySize;
-            SetBakeMaterialParameterArraySize(materials, names, valuesA, valuesB, newIndex + 1);
-            materials.GetArrayElementAtIndex(newIndex).objectReferenceValue = null;
-            names.GetArrayElementAtIndex(newIndex).stringValue = "";
-            valuesA.GetArrayElementAtIndex(newIndex).floatValue = 0f;
-            valuesB.GetArrayElementAtIndex(newIndex).floatValue = 0f;
-        }
+            if (GUILayout.Button("対象マテリアルを追加"))
+            {
+                int newIndex = materials.arraySize;
+                SetBakeMaterialParameterArraySize(materials, names, valuesA, valuesB, newIndex + 1);
+                materials.GetArrayElementAtIndex(newIndex).objectReferenceValue = null;
+                names.GetArrayElementAtIndex(newIndex).stringValue = "";
+                valuesA.GetArrayElementAtIndex(newIndex).floatValue = 0f;
+                valuesB.GetArrayElementAtIndex(newIndex).floatValue = 0f;
+            }
 
-        DrawBakeMaterialParameterDropArea(materials, names, valuesA, valuesB);
+            DrawBakeMaterialParameterDropArea(materials, names, valuesA, valuesB);
+        }
     }
 
     private static void DrawBakeMaterialParameterDropArea(
@@ -544,7 +619,7 @@ public class LightmapMixerEditor : Editor
             for (int i = 0; i < renderers.Length; i++)
             {
                 Renderer renderer = renderers[i];
-                if (renderer == null || renderer.lightmapIndex < 0)
+                if (!ShouldCollectRenderer(renderer))
                 {
                     continue;
                 }
@@ -559,6 +634,62 @@ public class LightmapMixerEditor : Editor
         installer.targetLightmapIndices = lightmapIndices.ToArray();
         EditorUtility.SetDirty(installer);
         PrefabUtility.RecordPrefabInstancePropertyModifications(installer);
+    }
+
+    private static bool ShouldCollectRenderer(Renderer renderer)
+    {
+        if (renderer == null)
+        {
+            return false;
+        }
+
+        if (renderer.lightmapIndex >= 0)
+        {
+            return true;
+        }
+
+        return IsLightmapCandidateRenderer(renderer);
+    }
+
+    private static bool IsLightmapCandidateRenderer(Renderer renderer)
+    {
+        if (renderer == null || !HasAnySharedMaterial(renderer))
+        {
+            return false;
+        }
+
+        MeshRenderer meshRenderer = renderer as MeshRenderer;
+        if (meshRenderer == null)
+        {
+            return false;
+        }
+
+        StaticEditorFlags staticFlags = GameObjectUtility.GetStaticEditorFlags(renderer.gameObject);
+        if ((staticFlags & StaticEditorFlags.ContributeGI) != 0)
+        {
+            return true;
+        }
+
+        return renderer.gameObject.isStatic;
+    }
+
+    private static bool HasAnySharedMaterial(Renderer renderer)
+    {
+        if (renderer == null || renderer.sharedMaterials == null)
+        {
+            return false;
+        }
+
+        Material[] materials = renderer.sharedMaterials;
+        for (int i = 0; i < materials.Length; i++)
+        {
+            if (materials[i] != null)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static void StartLightmapRendering(LightmapMixer installer)
@@ -601,6 +732,7 @@ public class LightmapMixerEditor : Editor
         Debug.Log("[VRCLightmapMixer] Step: clear current Bakery output before lightmap A.");
         ClearCurrentBakeryOutputLightmaps(activeBakeInstaller);
         SaveActiveScene();
+        PrepareLightVolumeAtlasOutputForFullRender(activeBakeInstaller, "lightmap A");
 
         Debug.Log("[VRCLightmapMixer] Step: render lightmap A.");
         RegisterBakeryFullRenderCallbacks(OnFinishedLightmapA);
@@ -631,6 +763,7 @@ public class LightmapMixerEditor : Editor
         Debug.Log("[VRCLightmapMixer] Step: clear current Bakery output before lightmap B.");
         ClearCurrentBakeryOutputLightmaps(activeBakeInstaller);
         SaveActiveScene();
+        PrepareLightVolumeAtlasOutputForFullRender(activeBakeInstaller, "lightmap B");
 
         Debug.Log("[VRCLightmapMixer] Step: render lightmap B.");
         RegisterBakeryFullRenderCallbacks(OnFinishedLightmapB);
@@ -821,7 +954,7 @@ public class LightmapMixerEditor : Editor
 
         if (completedStep == BakeStep.RenderingLightProbes)
         {
-            ScheduleNextBakeStep(RenderReflectionProbesAOrRenderLightmapB, "reflection probes A or lightmap B");
+            ScheduleWaitForLightVolumeAtlasAfterFullRender(false, true, RenderReflectionProbesAOrRenderLightmapB, "reflection probes A or lightmap B");
             return;
         }
 
@@ -913,7 +1046,19 @@ public class LightmapMixerEditor : Editor
         AssignLightmapTextures(activeBakeInstaller, pendingCopyAssignA, textures);
         Debug.Log($"[VRCLightmapMixer] Assigned lightmap {(pendingCopyAssignA ? "A" : "B")} textures. textureSlots={textures.Length}, hasAny={HasAnyTexture(textures)}");
 
-        if (pendingCopyAssignA)
+        bool assignA = pendingCopyAssignA;
+        ScheduleWaitForLightVolumeAtlasAfterFullRender(true, assignA, () => ContinueAfterLightmapAssignment(assignA), $"continue after lightmap {(assignA ? "A" : "B")} VRCLightVolumes atlas");
+    }
+
+    private static void ContinueAfterLightmapAssignment(bool assignA)
+    {
+        if (!ValidateActiveBake())
+        {
+            FinishBakeSequence(true);
+            return;
+        }
+
+        if (assignA)
         {
             if (activeBakeInstaller.autoCollectRenderersBeforeBake)
             {
@@ -951,6 +1096,7 @@ public class LightmapMixerEditor : Editor
         LogBakeObjectDiagnostics(activeBakeInstaller);
         ForceBakeryRefresh(activeBakeInstaller);
         SaveActiveScene();
+        PrepareLightVolumeAtlasOutputForFullRender(activeBakeInstaller, "light probes");
 
         Debug.Log("[VRCLightmapMixer] Step: render light probes.");
         RegisterBakeryFullRenderCallbacks(OnFinishedLightProbes);
@@ -972,6 +1118,7 @@ public class LightmapMixerEditor : Editor
     {
         if (!activeBakeInstaller.renderReflectionProbesAfterLightmaps)
         {
+            Debug.Log("[VRCLightmapMixer] Step: reflection probes A skipped.");
             RenderLightmapB();
             return;
         }
@@ -983,6 +1130,7 @@ public class LightmapMixerEditor : Editor
         }
 
         reflectionProbesACompleted = true;
+        Debug.Log("[VRCLightmapMixer] Step: no reflection probes A are assigned.");
         RenderLightmapB();
     }
 
@@ -1020,6 +1168,7 @@ public class LightmapMixerEditor : Editor
         if (!activeBakeInstaller.renderReflectionProbesAfterLightmaps)
         {
             reflectionProbesBCompleted = true;
+            Debug.Log("[VRCLightmapMixer] Step: reflection probes B skipped.");
             FinishBakeSequence(true);
             return;
         }
@@ -1031,6 +1180,7 @@ public class LightmapMixerEditor : Editor
         }
 
         reflectionProbesBCompleted = true;
+        Debug.Log("[VRCLightmapMixer] Step: no reflection probes B are assigned.");
         FinishBakeSequence(true);
     }
 
@@ -1080,6 +1230,12 @@ public class LightmapMixerEditor : Editor
         {
             EnableConfiguredReflectionProbeObjects(activeBakeInstaller);
         }
+
+        if (showCompletionDialog)
+        {
+            AssignMixedLightVolumeAtlasToManager(activeBakeInstaller);
+        }
+
         SaveActiveScene();
 
         AssetDatabase.SaveAssets();
@@ -1096,6 +1252,7 @@ public class LightmapMixerEditor : Editor
 
         EditorApplication.delayCall -= CopyAfterBakeOutputIsReady;
         EditorApplication.update -= PollCopyAfterBakeOutput;
+        ClearPendingLightVolumeWait();
         savedObjectStates.Clear();
         savedEmissionColors.Clear();
         reflectionProbesACompleted = false;
@@ -1515,7 +1672,7 @@ public class LightmapMixerEditor : Editor
         }
 
         string sceneNamePrefix = installer.gameObject.scene.name + "_";
-        List<string> sourceFolders = GetCurrentBakeryOutputFolders(installer);
+        List<string> sourceFolders = GetCurrentLightVolumeOutputFolders(installer);
         for (int i = 0; i < sourceFolders.Count; i++)
         {
             string sourceFolder = NormalizeAssetFolder(sourceFolders[i]);
@@ -1629,6 +1786,7 @@ public class LightmapMixerEditor : Editor
             }
 
             DeleteGeneratedLightmapsInFolder(sourceFolder, sceneNamePrefix);
+            DeleteGeneratedLightVolumeAssetsInFolder(sourceFolder, sceneNamePrefix);
         }
 
         AssetDatabase.SaveAssets();
@@ -1718,6 +1876,315 @@ public class LightmapMixerEditor : Editor
         return textures;
     }
 
+    private static void CopyAndAssignLightVolumeOutput(bool assignA)
+    {
+        if (!ValidateActiveBake())
+        {
+            return;
+        }
+
+        string outputFolder = assignA ? activeBakeInstaller.lightmapAOutputFolder : activeBakeInstaller.lightmapBOutputFolder;
+        Debug.Log($"[VRCLightmapMixer] Step: copy VRCLightVolumes atlas for {(assignA ? "A" : "B")}. outputFolder={outputFolder}");
+        CopyGeneratedLightVolumesFromCurrentOutput(activeBakeInstaller, outputFolder, true);
+        AssignLightVolumeAtlas(activeBakeInstaller, assignA);
+    }
+
+    private static void ScheduleWaitForLightVolumeAtlasAfterFullRender(bool copyAndAssign, bool assignA, System.Action nextStep, string nextStepLabel)
+    {
+        if (!ValidateActiveBake())
+        {
+            FinishBakeSequence();
+            return;
+        }
+
+        if (!ShouldHandleLightVolumeAtlas(activeBakeInstaller))
+        {
+            if (nextStep != null)
+            {
+                ScheduleNextBakeStep(nextStep, nextStepLabel);
+            }
+
+            return;
+        }
+
+        pendingLightVolumeCopyAndAssign = copyAndAssign;
+        pendingLightVolumeAssignA = assignA;
+        pendingLightVolumeAttempts = 0;
+        pendingLightVolumeStartedAt = EditorApplication.timeSinceStartup;
+        pendingNextLightVolumeCheckAt = pendingLightVolumeStartedAt;
+        pendingLightVolumeNextStep = nextStep;
+        pendingLightVolumeNextStepLabel = nextStepLabel;
+
+        EditorApplication.update -= PollLightVolumeAtlasAfterFullRender;
+        EditorApplication.update += PollLightVolumeAtlasAfterFullRender;
+        Debug.Log($"[VRCLightmapMixer] Waiting for VRCLightVolumes LightVolumeAtlas.asset after Bakery full render. copyAndAssign={copyAndAssign}, assign={(assignA ? "A" : "B")}");
+        LogCurrentLightVolumeAtlasCandidates(activeBakeInstaller);
+    }
+
+    private static void PollLightVolumeAtlasAfterFullRender()
+    {
+        if (EditorApplication.timeSinceStartup < pendingNextLightVolumeCheckAt)
+        {
+            return;
+        }
+
+        pendingNextLightVolumeCheckAt = EditorApplication.timeSinceStartup + PendingCopyPollIntervalSeconds;
+
+        if (!ValidateActiveBake())
+        {
+            ClearPendingLightVolumeWait();
+            FinishBakeSequence(true);
+            return;
+        }
+
+        string sourcePath = FindGeneratedLightVolumeAtlasPath(activeBakeInstaller);
+        if (!string.IsNullOrEmpty(sourcePath) && AssetDatabase.LoadAssetAtPath<Texture>(sourcePath) != null)
+        {
+            Debug.Log($"[VRCLightmapMixer] VRCLightVolumes LightVolumeAtlas.asset is ready: {sourcePath}");
+            CompletePendingLightVolumeWait();
+            return;
+        }
+
+        pendingLightVolumeAttempts++;
+        if (pendingLightVolumeAttempts % 10 == 0)
+        {
+            Debug.Log($"[VRCLightmapMixer] Still waiting for VRCLightVolumes LightVolumeAtlas.asset. attempts={pendingLightVolumeAttempts}");
+            LogCurrentLightVolumeAtlasCandidates(activeBakeInstaller);
+        }
+
+        if (EditorApplication.timeSinceStartup - pendingLightVolumeStartedAt < MaxPendingLightVolumeWaitSeconds)
+        {
+            return;
+        }
+
+        Debug.LogWarning("[VRCLightmapMixer] VRCLightVolumes LightVolumeAtlas.asset was not generated before timeout. Continuing bake sequence without updating VRCLightVolumes atlas.");
+        CompletePendingLightVolumeWait(false);
+    }
+
+    private static void CompletePendingLightVolumeWait(bool copyIfRequested = true)
+    {
+        bool copyAndAssign = pendingLightVolumeCopyAndAssign && copyIfRequested;
+        bool assignA = pendingLightVolumeAssignA;
+        System.Action nextStep = pendingLightVolumeNextStep;
+        string nextStepLabel = pendingLightVolumeNextStepLabel;
+
+        ClearPendingLightVolumeWait();
+
+        if (copyAndAssign)
+        {
+            CopyAndAssignLightVolumeOutput(assignA);
+        }
+
+        if (nextStep != null)
+        {
+            ScheduleNextBakeStep(nextStep, nextStepLabel);
+        }
+    }
+
+    private static void ClearPendingLightVolumeWait()
+    {
+        EditorApplication.update -= PollLightVolumeAtlasAfterFullRender;
+        pendingLightVolumeCopyAndAssign = false;
+        pendingLightVolumeAssignA = false;
+        pendingLightVolumeAttempts = 0;
+        pendingLightVolumeStartedAt = 0;
+        pendingNextLightVolumeCheckAt = 0;
+        pendingLightVolumeNextStep = null;
+        pendingLightVolumeNextStepLabel = null;
+    }
+
+    private static bool ShouldHandleLightVolumeAtlas(LightmapMixer installer)
+    {
+        return installer != null && installer.mixedLightVolumeMaterial != null;
+    }
+
+    private static void PrepareLightVolumeAtlasOutputForFullRender(LightmapMixer installer, string stepLabel)
+    {
+        if (!ShouldHandleLightVolumeAtlas(installer))
+        {
+            return;
+        }
+
+        DeleteCurrentLightVolumeAtlasCandidates(installer);
+        Debug.Log($"[VRCLightmapMixer] Cleared VRCLightVolumes LightVolumeAtlas.asset before {stepLabel}.");
+    }
+
+    private static void CopyGeneratedLightVolumesFromCurrentOutput(LightmapMixer installer, string outputFolder, bool logMissingFiles)
+    {
+        if (installer == null)
+        {
+            return;
+        }
+
+        outputFolder = NormalizeAssetFolder(outputFolder);
+        EnsureAssetFolder(outputFolder);
+        AssetDatabase.Refresh();
+
+        CopyGeneratedLightVolumeAtlas(installer, outputFolder, logMissingFiles);
+
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+    }
+
+    private static void CopyGeneratedLightVolumeAtlas(LightmapMixer installer, string outputFolder, bool logMissingFiles)
+    {
+        string sourcePath = FindGeneratedLightVolumeAtlasPath(installer);
+        if (string.IsNullOrEmpty(sourcePath))
+        {
+            if (logMissingFiles)
+            {
+                Debug.Log("[VRCLightmapMixer] VRCLightVolumes LightVolumeAtlas.asset was not found. Skipping light volume atlas copy.");
+            }
+
+            return;
+        }
+
+        string destinationPath = AssetPathCombine(outputFolder, "LightVolumeAtlas.asset");
+        if (CopyAssetFile(sourcePath, destinationPath))
+        {
+            Debug.Log($"[VRCLightmapMixer] Copied VRCLightVolumes atlas from {sourcePath} to {destinationPath}.");
+        }
+    }
+
+    private static string FindGeneratedLightVolumeAtlasPath(LightmapMixer installer)
+    {
+        if (installer == null)
+        {
+            return null;
+        }
+
+        List<string> candidates = GetCurrentLightVolumeAtlasCandidatePaths(installer);
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            string candidate = NormalizeAssetPath(candidates[i]);
+            if (AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(candidate) != null ||
+                File.Exists(AssetPathToAbsolutePath(candidate)))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private static List<string> GetCurrentLightVolumeAtlasCandidatePaths(LightmapMixer installer)
+    {
+        List<string> candidates = new List<string>();
+        List<string> sourceFolders = GetCurrentLightVolumeOutputFolders(installer);
+        for (int i = 0; i < sourceFolders.Count; i++)
+        {
+            AddPathCandidate(candidates, AssetPathCombine(sourceFolders[i], "LightVolumeAtlas.asset"));
+        }
+
+        return candidates;
+    }
+
+    private static void DeleteCurrentLightVolumeAtlasCandidates(LightmapMixer installer)
+    {
+        List<string> candidates = GetCurrentLightVolumeAtlasCandidatePaths(installer);
+        bool deletedAny = false;
+
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            string candidate = NormalizeAssetPath(candidates[i]);
+            if (AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(candidate) != null)
+            {
+                deletedAny = AssetDatabase.DeleteAsset(candidate) || deletedAny;
+                continue;
+            }
+
+            string absolutePath = AssetPathToAbsolutePath(candidate);
+            if (File.Exists(absolutePath))
+            {
+                DeletePhysicalAssetFile(candidate);
+                deletedAny = true;
+            }
+        }
+
+        if (deletedAny)
+        {
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh();
+        }
+    }
+
+    private static void LogCurrentLightVolumeAtlasCandidates(LightmapMixer installer)
+    {
+        List<string> candidates = GetCurrentLightVolumeAtlasCandidatePaths(installer);
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            string candidate = NormalizeAssetPath(candidates[i]);
+            bool assetExists = AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(candidate) != null;
+            bool fileExists = File.Exists(AssetPathToAbsolutePath(candidate));
+            Debug.Log($"[VRCLightmapMixer] VRCLightVolumes atlas candidate: {candidate}, assetExists={assetExists}, fileExists={fileExists}");
+        }
+    }
+
+    private static void AddPathCandidate(List<string> candidates, string path)
+    {
+        if (candidates == null || string.IsNullOrWhiteSpace(path))
+        {
+            return;
+        }
+
+        path = NormalizeAssetPath(path);
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            if (candidates[i] == path)
+            {
+                return;
+            }
+        }
+
+        candidates.Add(path);
+    }
+
+    private static bool CopyAssetFile(string sourcePath, string destinationPath)
+    {
+        sourcePath = NormalizeAssetPath(sourcePath);
+        destinationPath = NormalizeAssetPath(destinationPath);
+        EnsureAssetFolder(GetAssetFolder(destinationPath));
+
+        if (sourcePath == destinationPath)
+        {
+            AssetDatabase.ImportAsset(sourcePath);
+            return true;
+        }
+
+        if (AssetDatabase.LoadAssetAtPath<UnityEngine.Object>(destinationPath) != null)
+        {
+            AssetDatabase.DeleteAsset(destinationPath);
+        }
+        else
+        {
+            DeletePhysicalAssetFile(destinationPath);
+        }
+
+        if (File.Exists(AssetPathToAbsolutePath(sourcePath)))
+        {
+            AssetDatabase.ImportAsset(sourcePath);
+        }
+
+        if (AssetDatabase.CopyAsset(sourcePath, destinationPath))
+        {
+            AssetDatabase.ImportAsset(destinationPath);
+            return true;
+        }
+
+        string absoluteSourcePath = AssetPathToAbsolutePath(sourcePath);
+        string absoluteDestinationPath = AssetPathToAbsolutePath(destinationPath);
+        if (!File.Exists(absoluteSourcePath))
+        {
+            Debug.LogWarning($"[VRCLightmapMixer] Source asset does not exist: {sourcePath}");
+            return false;
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(absoluteDestinationPath));
+        File.Copy(absoluteSourcePath, absoluteDestinationPath, true);
+        AssetDatabase.ImportAsset(destinationPath);
+        return true;
+    }
+
     private static bool HasAnyTexture(Texture2D[] textures)
     {
         if (textures == null)
@@ -1768,6 +2235,50 @@ public class LightmapMixerEditor : Editor
         }
     }
 
+    private static void DeleteGeneratedLightVolumeAssetsInFolder(string folderPath, string sceneNamePrefix)
+    {
+        folderPath = NormalizeAssetFolder(folderPath);
+        string absoluteFolderPath = AssetFolderToAbsolutePath(folderPath);
+        if (!Directory.Exists(absoluteFolderPath))
+        {
+            return;
+        }
+
+        string[] filePaths = Directory.GetFiles(absoluteFolderPath, "*.asset", SearchOption.TopDirectoryOnly);
+        for (int i = 0; i < filePaths.Length; i++)
+        {
+            if (IsMetaFile(filePaths[i]))
+            {
+                DeleteOrphanGeneratedLightVolumeMetaFile(filePaths[i], sceneNamePrefix);
+                continue;
+            }
+
+            string fileNameWithoutExtension = Path.GetFileNameWithoutExtension(filePaths[i]);
+            if (!IsGeneratedLightVolumeAssetName(fileNameWithoutExtension, sceneNamePrefix))
+            {
+                continue;
+            }
+
+            string assetPath = AbsolutePathToAssetPath(filePaths[i]);
+            if (!AssetDatabase.DeleteAsset(assetPath))
+            {
+                DeletePhysicalAssetFile(assetPath);
+            }
+        }
+    }
+
+    private static bool IsGeneratedLightVolumeAssetName(string fileNameWithoutExtension, string sceneNamePrefix)
+    {
+        if (string.IsNullOrEmpty(fileNameWithoutExtension) ||
+            fileNameWithoutExtension.IndexOf("Light Volume", System.StringComparison.OrdinalIgnoreCase) < 0)
+        {
+            return false;
+        }
+
+        return fileNameWithoutExtension.StartsWith(sceneNamePrefix, System.StringComparison.Ordinal) ||
+            fileNameWithoutExtension.StartsWith("Light Volume", System.StringComparison.OrdinalIgnoreCase);
+    }
+
     private static bool IsMetaFile(string path)
     {
         return string.Equals(Path.GetExtension(path), ".meta", System.StringComparison.OrdinalIgnoreCase);
@@ -1785,6 +2296,23 @@ public class LightmapMixerEditor : Editor
         if (!fileNameWithoutExtension.StartsWith(sceneNamePrefix, System.StringComparison.Ordinal) ||
             fileNameWithoutExtension.IndexOf("_final", System.StringComparison.Ordinal) < 0 ||
             GetLightmapIndexFromFileName(fileNameWithoutExtension) < 0)
+        {
+            return;
+        }
+
+        File.Delete(metaPath);
+    }
+
+    private static void DeleteOrphanGeneratedLightVolumeMetaFile(string metaPath, string sceneNamePrefix)
+    {
+        string assetPathWithoutMeta = metaPath.Substring(0, metaPath.Length - ".meta".Length);
+        if (File.Exists(assetPathWithoutMeta))
+        {
+            return;
+        }
+
+        string fileNameWithoutExtension = Path.GetFileNameWithoutExtension(assetPathWithoutMeta);
+        if (!IsGeneratedLightVolumeAssetName(fileNameWithoutExtension, sceneNamePrefix))
         {
             return;
         }
@@ -1886,6 +2414,37 @@ public class LightmapMixerEditor : Editor
         return folders;
     }
 
+    private static List<string> GetCurrentLightVolumeOutputFolders(LightmapMixer installer)
+    {
+        List<string> folders = new List<string>();
+        if (installer != null)
+        {
+            Scene scene = installer.gameObject.scene;
+            string sceneName = scene.name;
+            string scenePath = scene.path;
+
+            if (!string.IsNullOrEmpty(scenePath))
+            {
+                string sceneFolder = NormalizeAssetFolder(Path.GetDirectoryName(scenePath));
+                AddBakeryOutputFolder(folders, sceneFolder + "/" + sceneName + "/VRCLightVolumes");
+                AddBakeryOutputFolder(folders, sceneFolder + "/" + sceneName);
+                AddBakeryOutputFolder(folders, sceneFolder + "/VRCLightVolumes");
+                AddBakeryOutputFolder(folders, sceneFolder);
+            }
+
+            AddBakeryOutputFolder(folders, "Assets/Scenes/" + sceneName + "/VRCLightVolumes");
+            AddBakeryOutputFolder(folders, "Assets/Scenes/" + sceneName);
+        }
+
+        List<string> bakeryOutputFolders = GetCurrentBakeryOutputFolders(installer);
+        for (int i = 0; i < bakeryOutputFolders.Count; i++)
+        {
+            AddBakeryOutputFolder(folders, bakeryOutputFolders[i]);
+        }
+
+        return folders;
+    }
+
     private static void AddBakeryOutputFolder(List<string> folders, string folder)
     {
         if (string.IsNullOrWhiteSpace(folder))
@@ -1924,6 +2483,76 @@ public class LightmapMixerEditor : Editor
 
         EditorUtility.SetDirty(installer);
         PrefabUtility.RecordPrefabInstancePropertyModifications(installer);
+    }
+
+    private static void AssignLightVolumeAtlas(LightmapMixer installer, bool assignA)
+    {
+        if (installer == null || installer.mixedLightVolumeMaterial == null)
+        {
+            return;
+        }
+
+        string outputFolder = assignA ? installer.lightmapAOutputFolder : installer.lightmapBOutputFolder;
+        Texture lightVolumeAtlas = LoadLightVolumeAtlasFromFolder(outputFolder);
+        if (lightVolumeAtlas == null)
+        {
+            Debug.LogWarning($"[VRCLightmapMixer] VRCLightVolumes atlas was not found in {NormalizeAssetFolder(outputFolder)}. Mixed light volume material was not updated.");
+            return;
+        }
+
+        string propertyName = assignA ? LightVolumeTextureAProperty : LightVolumeTextureBProperty;
+        Material material = installer.mixedLightVolumeMaterial;
+        Undo.RecordObject(material, assignA ? "Assign light volume atlas A" : "Assign light volume atlas B");
+
+        if (!material.HasProperty(propertyName))
+        {
+            Debug.LogWarning($"[VRCLightmapMixer] Mixed light volume material '{material.name}' does not have shader property '{propertyName}'.");
+        }
+
+        material.SetTexture(propertyName, lightVolumeAtlas);
+        EditorUtility.SetDirty(material);
+        Debug.Log($"[VRCLightmapMixer] Assigned VRCLightVolumes atlas {(assignA ? "A" : "B")} to {material.name}.{propertyName}: {AssetDatabase.GetAssetPath(lightVolumeAtlas)}");
+    }
+
+    private static void AssignMixedLightVolumeAtlasToManager(LightmapMixer installer)
+    {
+        if (installer == null || installer.lightVolumeManager == null || installer.mixedLightVolumeAtlas == null)
+        {
+            return;
+        }
+
+        SerializedObject serializedManager = new SerializedObject(installer.lightVolumeManager);
+        SerializedProperty atlasProperty = serializedManager.FindProperty("LightVolumeAtlas");
+        if (atlasProperty != null && atlasProperty.propertyType == SerializedPropertyType.ObjectReference)
+        {
+            atlasProperty.objectReferenceValue = installer.mixedLightVolumeAtlas;
+            serializedManager.ApplyModifiedProperties();
+            EditorUtility.SetDirty(installer.lightVolumeManager);
+            PrefabUtility.RecordPrefabInstancePropertyModifications(installer.lightVolumeManager);
+            Debug.Log($"[VRCLightmapMixer] Assigned mixed VRCLightVolumes atlas to Light Volume Manager: {AssetDatabase.GetAssetPath(installer.mixedLightVolumeAtlas)}");
+            return;
+        }
+
+        System.Reflection.FieldInfo atlasField = installer.lightVolumeManager.GetType().GetField(
+            "LightVolumeAtlas",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic);
+
+        if (atlasField != null && typeof(Texture).IsAssignableFrom(atlasField.FieldType))
+        {
+            atlasField.SetValue(installer.lightVolumeManager, installer.mixedLightVolumeAtlas);
+            EditorUtility.SetDirty(installer.lightVolumeManager);
+            PrefabUtility.RecordPrefabInstancePropertyModifications(installer.lightVolumeManager);
+            Debug.Log($"[VRCLightmapMixer] Assigned mixed VRCLightVolumes atlas to Light Volume Manager by reflection: {AssetDatabase.GetAssetPath(installer.mixedLightVolumeAtlas)}");
+            return;
+        }
+
+        Debug.LogWarning("[VRCLightmapMixer] Light Volume Manager does not have a Texture field named LightVolumeAtlas. MixedLightVolumeAtlas was not assigned.");
+    }
+
+    private static Texture LoadLightVolumeAtlasFromFolder(string folderPath)
+    {
+        string assetPath = AssetPathCombine(folderPath, "LightVolumeAtlas.asset");
+        return AssetDatabase.LoadAssetAtPath<Texture>(assetPath);
     }
 
     private static Texture2D[] LoadLightmapsFromFolder(string folderPath)
@@ -2144,6 +2773,18 @@ public class LightmapMixerEditor : Editor
     private static string AssetPathCombine(string folderPath, string fileName)
     {
         return NormalizeAssetFolder(folderPath) + "/" + fileName;
+    }
+
+    private static string GetAssetFolder(string assetPath)
+    {
+        assetPath = NormalizeAssetPath(assetPath);
+        int slashIndex = assetPath.LastIndexOf('/');
+        if (slashIndex < 0)
+        {
+            return "Assets";
+        }
+
+        return assetPath.Substring(0, slashIndex);
     }
 }
 

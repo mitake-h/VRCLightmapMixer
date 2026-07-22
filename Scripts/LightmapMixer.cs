@@ -13,6 +13,8 @@ namespace Jumius.VRCLightmapMixer
         private const string MixUseProperty = "_UdonMultiLightmapGlobalMixUse";
         private const string MixAProperty = "_UdonMultiLightmapGlobalMixA";
         private const string MixBProperty = "_UdonMultiLightmapGlobalMixB";
+        private const string LightVolumeWeightAProperty = "_WeightA";
+        private const string LightVolumeWeightBProperty = "_WeightB";
 
         [Header("Replacement")]
         public Shader replacementShader;
@@ -35,6 +37,9 @@ namespace Jumius.VRCLightmapMixer
         public bool renderLightProbesAfterLightmaps = true;
         public bool renderReflectionProbesAfterLightmaps = true;
         public bool restoreObjectStatesAfterRendering = true;
+        public Material mixedLightVolumeMaterial;
+        public Texture mixedLightVolumeAtlas;
+        public UdonSharpBehaviour lightVolumeManager;
         public Material[] emissiveMaterialsForLightmapA;
         public Material[] emissiveMaterialsForLightmapB;
         [HideInInspector]
@@ -95,6 +100,7 @@ namespace Jumius.VRCLightmapMixer
 
             ApplyRuntimeReflectionProbeIntensities();
             ApplyRuntimeEmissiveMaterials();
+            ApplyRuntimeLightVolumeWeights();
         }
 
         public void Apply()
@@ -419,6 +425,7 @@ namespace Jumius.VRCLightmapMixer
             SetMix(runtimeMixUse, runtimeMixA, runtimeMixB);
             ApplyRuntimeReflectionProbeIntensities();
             ApplyRuntimeEmissiveMaterials();
+            ApplyRuntimeLightVolumeWeights();
             StoreLastRuntimeMix();
         }
 
@@ -434,6 +441,18 @@ namespace Jumius.VRCLightmapMixer
             EnsureRuntimeApplyInitialized();
             ApplyRuntimeEmissiveMaterials(_runtimeEmissiveMaterialsForLightmapA, _runtimeEmissiveBaseColorsForLightmapA, _runtimeEmissiveMaterialCountA, runtimeMixA);
             ApplyRuntimeEmissiveMaterials(_runtimeEmissiveMaterialsForLightmapB, _runtimeEmissiveBaseColorsForLightmapB, _runtimeEmissiveMaterialCountB, runtimeMixB);
+        }
+
+        public void ApplyRuntimeLightVolumeWeights()
+        {
+            EnsureRuntimeApplyInitialized();
+            if (mixedLightVolumeMaterial == null)
+            {
+                return;
+            }
+
+            mixedLightVolumeMaterial.SetFloat(LightVolumeWeightAProperty, runtimeMixA);
+            mixedLightVolumeMaterial.SetFloat(LightVolumeWeightBProperty, runtimeMixB);
         }
 
         public void SetRuntimeMix(float use, float a, float b)
